@@ -1,0 +1,45 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "check docker version",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"--version"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check docker version",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"--version"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "ashia smoke check",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Location e:\\ashia; docker compose ps; Write-Host '--- URL checks ---'; $urls=@('http://localhost:3000/login','http://localhost:8080/api/v1/docs','http://localhost:9090','http://localhost:16686'); foreach($u in $urls){ try{$r=Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 8; Write-Host \"$u => $($r.StatusCode)\"} catch { Write-Host \"$u => ERROR: $($_.Exception.Message)\" } }; Write-Host '--- Prometheus up query ---'; try { $p=Invoke-WebRequest -Uri 'http://localhost:9090/api/v1/query?query=up' -UseBasicParsing -TimeoutSec 8; Write-Host $p.Content } catch { Write-Host \"PROM ERROR: $($_.Exception.Message)\" }; Write-Host '--- Jaeger services API ---'; try { $j=Invoke-WebRequest -Uri 'http://localhost:16686/api/services' -UseBasicParsing -TimeoutSec 8; Write-Host $j.Content } catch { Write-Host \"JAEGER ERROR: $($_.Exception.Message)\" }"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "restart aiops service",
+			"type": "shell",
+			"command": "docker",
+			"args": [
+				"compose",
+				"restart",
+				"aiops"
+			],
+			"isBackground": false
+		}
+	]
+}

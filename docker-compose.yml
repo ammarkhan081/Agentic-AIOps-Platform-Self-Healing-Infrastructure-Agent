@@ -1,0 +1,188 @@
+version: "3.9"
+
+services:
+  api-gateway:
+    build: ./target-system/api-gateway
+    container_name: ashia-api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - USER_SERVICE_URL=http://user-service:8001
+      - ORDER_SERVICE_URL=http://order-service:8002
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+    networks: [ashia-net]
+    restart: unless-stopped
+    depends_on:
+      user-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  user-service:
+    build: ./target-system/user-service
+    container_name: ashia-user-service
+    ports:
+      - "8001:8001"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - DATABASE_URL=postgresql://ashia:ashia_secret@postgres:5432/ashia_db
+      - USER_DB_POOL_MAX=20
+    networks: [ashia-net]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  order-service:
+    build: ./target-system/order-service
+    container_name: ashia-order-service
+    ports:
+      - "8002:8002"
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - REDIS_URL=redis://redis:6379
+    networks: [ashia-net]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: ashia-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./target-system/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=24h"
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: ashia-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./target-system/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: ashia-promtail
+    volumes:
+      - ./target-system/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.56
+    container_name: ashia-jaeger
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ashia-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=ashia
+      - POSTGRES_PASSWORD=ashia_secret
+      - POSTGRES_DB=ashia_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [ashia-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashia -d ashia_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ashia-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  aiops:
+    build: ./aiops
+    container_name: ashia-aiops
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - LOKI_URL=http://loki:3100
+      - JAEGER_URL=http://jaeger:16686
+      - DATABASE_URL=postgresql://ashia:ashia_secret@postgres:5432/ashia_db
+      - REDIS_URL=redis://redis:6379
+      - ORDER_SERVICE_URL=http://order-service:8002
+      - USER_SERVICE_URL=http://user-service:8001
+      - API_GATEWAY_URL=http://api-gateway:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [ashia-net]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: ashia-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - aiops
+    networks: [ashia-net]
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  loki-data:
+  postgres-data:
+  redis-data:
+
+networks:
+  ashia-net:
+    driver: bridge

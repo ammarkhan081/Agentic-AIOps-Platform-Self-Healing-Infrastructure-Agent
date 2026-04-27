@@ -1,0 +1,15 @@
+# Default ownership
+* @OWNER
+
+# Backend control plane
+/aiops/ @OWNER
+
+# Frontend operator UI
+/frontend/ @OWNER
+
+# Infrastructure and automation
+/.github/ @OWNER
+/docker-compose.yml @OWNER
+/docker-compose.prod.yml @OWNER
+/scripts/ @OWNER
+

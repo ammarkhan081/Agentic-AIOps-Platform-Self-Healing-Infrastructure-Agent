@@ -1,0 +1,649 @@
+﻿PROJECT SPECIFICATION DOCUMENT
+Agentic AIOps Platform
+Self-Healing Infrastructure Agent
+Autonomous Fault Detection, Root Cause Analysis, Remediation & Continual Learning
+Document ID
+ML-AIOPS-2026-002
+Project Owner
+Engineering â€” AI Systems Division
+Assigned To
+Ammar Ayaz â€” AI Engineer
+Issue Date
+March 15, 2026
+Deadline
+April 28, 2026 (6 weeks)
+Priority
+P0 â€” Critical
+Version
+1.0 â€” Final
+Status
+Active Development
+Difficulty
+Senior Level â€” Expect deep learning
+1. Executive Summary
+Mission Statement
+Design and deploy a production-grade, multi-agent autonomous platform that continuously monitors a live microservices infrastructure, detects anomalies in real time, reasons about root causes using LLM-based causal analysis, generates and executes remediation actions, validates recovery, and learns from every incident to reduce future mean time to recovery.
+The Agentic AIOps Self-Healing Infrastructure Agent (ASHIA) represents a fundamentally different class of AI project. Unlike research assistants or RAG chatbots that produce documents, ASHIA controls live infrastructure. It perceives real system telemetry, reasons about failures, and executes real actions via API calls to the Docker SDK. This closed-loop autonomous operation is what makes it rare, technically demanding, and immediately compelling to any engineering hiring manager.
+The system is deliberately scoped to a realistic demo environment â€” a three-service Docker Compose application â€” making it completable in six weeks while demonstrating every principle that would apply at enterprise scale. It is designed to be extended to Kubernetes in v1.1 without architectural changes.
+1.1 Business Context & Market Justification
+Metric
+Data Point
+Global AIOps market (2028 projection)
+$32.4 Billion â€” CAGR 26.7%
+Enterprises with MTTR over 1 hour
+82% â€” primary pain point driving AIOps adoption
+Cost of one hour of downtime (average)
+$300,000 â€” Gartner 2025 estimate
+Downtime reduction with intelligent automation
+Up to 70% â€” validated across Fortune 500 deployments
+Engineers who can build closed-loop AIOps agents
+Critically scarce â€” fewer than 5 public GitHub implementations
+Target hiring companies for this skill
+AWS, Datadog, PagerDuty, Grafana Labs, any SRE-heavy org
+2. Problem Statement
+2.1 The Status Quo Is Broken
+Modern microservices architectures fail in ways that are impossible for humans to monitor manually. A production system emitting thousands of metric data points per minute across dozens of services requires automated intelligence â€” not dashboards that humans stare at.
+Problem 1:
+ Detection lag â€” A human on-call engineer typically takes 15â€“30 minutes to notice a degradation that has already been visible in metrics for 5 minutes. Every minute costs money.
+Problem 2:
+ Diagnosis bottleneck â€” Root cause analysis across distributed traces, logs, and metrics simultaneously is cognitively overwhelming. Engineers focus on the obvious signal and miss cascading causes.
+Problem 3:
+ Runbook rigidity â€” Standard runbooks handle known failure modes. Novel failures â€” a new memory leak pattern, an unexpected DB lock contention â€” fall outside runbooks and require senior engineers.
+Problem 4:
+ No institutional memory â€” Every time an incident is resolved, the knowledge of how it was fixed lives in one engineer's head or a Confluence page nobody reads. The next incident of the same type starts from zero.
+2.2 Why Existing Tools Are Insufficient
+Tool Category
+Why It Fails
+Prometheus + AlertManager
+Fires alerts but takes no action. Still requires human for diagnosis and remediation.
+PagerDuty / OpsGenie
+Routes alerts to humans faster. Does not reduce cognitive load or diagnosis time.
+Datadog Watchdog
+Anomaly detection only. No causal reasoning, no autonomous remediation, no learning.
+Basic AIOps tools (Moogsoft, BigPanda)
+Noise reduction and correlation. Not agentic â€” cannot reason or act autonomously.
+Simple LLM chatbots for ops
+Passive question-answering. Not connected to live telemetry. No tool execution.
+ASHIA (this system)
+Perceives, reasons, decides, acts, validates, and learns. Fully closed-loop.
+3. System Architecture
+3.1 High-Level Design
+ASHIA is composed of two independent layers: the Target System (the infrastructure being monitored and healed) and the AIOps Control Plane (the agentic system that monitors and heals it). These two layers communicate exclusively through well-defined interfaces: the Prometheus HTTP API, the Loki HTTP API, the Jaeger HTTP API, and the Docker SDK.
+Core architectural principle
+The AIOps Control Plane never reaches directly into the target system's code. It only interacts through the same observability and control APIs that any operator would use. This means the system is portable â€” point it at any observable system and it works.
+3.2 Target System (What Gets Monitored)
+The target system is a deliberately realistic three-service microservices application. It is not a toy â€” it has real dependencies, real failure modes, and real telemetry. This is what you demo against.
+Service
+Description
+API Gateway (FastAPI)
+Entry point. Routes traffic to User and Order services. Instrumented with OTel for traces and request metrics.
+User Service (FastAPI)
+Handles user CRUD operations. Backed by PostgreSQL. Susceptible to DB connection pool exhaustion.
+Order Service (FastAPI)
+Handles order processing. Memory-intensive. Susceptible to OOM kills and slow query degradation.
+PostgreSQL
+Shared database. Source of connection limit errors, slow queries, and lock contention incidents.
+Redis
+Caching layer. Source of cache stampede and memory overflow incidents.
+Prometheus
+Scrapes all services every 15s. Stores 24h of metrics for anomaly baseline calculation.
+Loki
+Collects structured JSON logs from all services via Promtail. Queryable via LogQL.
+Jaeger
+Receives OpenTelemetry traces from all services. Exposes Jaeger HTTP API for trace retrieval.
+3.3 AIOps Control Plane â€” LangGraph State Machine
+The control plane is a LangGraph directed graph. Each node is a specialized agent. Edges are conditional functions that route based on the current AgentState. The graph is persistent â€” state survives crashes via the PostgreSQL checkpointer.
+Graph execution lifecycle:
+Monitor Agent runs on a 30-second polling loop (LangGraph periodic trigger). Anomaly detected â†’ writes AlertEvent to AgentState â†’ routes to Root Cause Agent.
+Root Cause Agent queries Loki, Jaeger, and Pinecone. Feeds context to GPT-4o with structured CoT prompt. Writes ranked Hypothesis list to state â†’ routes to Remediation Agent.
+Remediation Agent generates fix options per hypothesis. Scores each for risk. Conditional edge: LOW risk â†’ execute immediately. MEDIUM or HIGH risk â†’ trigger HITL interrupt.
+HITL Interrupt serializes state to PostgreSQL. Sends Slack notification. Graph pauses. On human approval â†’ resumes to Remediation Agent execution. On abort â†’ routes to cleanup.
+Verifier Agent monitors recovery metrics for 60s. Recovered â†’ route to Learning Agent. Not recovered AND retries < 3 â†’ route back to Root Cause Agent with next hypothesis. Retries exhausted â†’ escalate.
+Learning Agent embeds full incident postmortem into Pinecone. Updates incident record in PostgreSQL. Graph terminates.
+4. Agent Definitions
+Each agent has a single responsibility, a defined input contract (what it reads from AgentState), a defined output contract (what it writes to AgentState), and a bounded toolset. Agents must not access state fields outside their contract.
+01  Monitor Agent
+Perception
+02  Root Cause Agent
+Reasoning
+03  Remediation Agent
+Action
+04  Verifier Agent
+Validation
+05  Learning Agent
+Memory
+06  HITL Supervisor
+Oversight
+Polls Prometheus PromQL
+Z-score anomaly detection
+12 monitored metrics
+Fires AlertEvent to state
+Queries Loki logs
+Queries Jaeger traces
+Retrieves past incidents
+GPT-4o CoT reasoning
+Generates fix options
+Scores risk per option
+Executes via Docker SDK
+Writes action receipt
+Re-polls Prometheus
+60-second window
+Confirm or trigger replan
+Max 3 retry loops
+Embeds postmortem
+Stores in Pinecone
+Updates PostgreSQL record
+Enables future retrieval
+LangGraph interrupt
+Slack notification
+Dashboard approval
+Audit trail log
+4.1 Agent â€” Monitor Agent (detailed specification)
+The Monitor Agent is the always-on sensor of the system. It runs on a configurable polling interval (default 30 seconds) and is the only entry point into the incident response pipeline.
+Monitored Metrics (PromQL queries)
+Metric Name
+PromQL Expression
+HTTP error rate
+rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m])
+Request latency p95
+histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+Memory usage %
+container_memory_usage_bytes / container_spec_memory_limit_bytes * 100
+CPU throttle rate
+rate(container_cpu_cfs_throttled_seconds_total[5m])
+DB connection pool usage
+pg_stat_activity_count / pg_settings_max_connections * 100
+Cache miss rate
+rate(redis_keyspace_misses_total[5m]) / rate(redis_keyspace_hits_total[5m])
+Pod restart count
+increase(kube_pod_container_status_restarts_total[15m])
+Disk I/O wait
+rate(node_disk_io_time_seconds_total[5m])
+Anomaly Detection Algorithm
+Fetch 24-hour rolling window of each metric from Prometheus.
+Compute rolling mean (mu) and standard deviation (sigma) using a 1-hour sliding window.
+Current value is anomalous if: abs(current - mu) > 2.5 * sigma.
+Consecutive anomalies required before firing: 3 (prevents transient spike false positives).
+AlertEvent payload includes: service_name, metric_name, current_value, expected_range, severity (LOW/MEDIUM/HIGH/CRITICAL).
+4.2 Agent â€” Root Cause Agent (detailed specification)
+The most cognitively complex agent. It receives an AlertEvent and must produce a ranked list of hypotheses with confidence scores by synthesizing evidence from three independent data sources.
+Context Assembly Pipeline
+Query Loki for last 50 log lines from the affected service with LogQL filter: {service="order-service"} |= "ERROR" | json.
+Query Jaeger for the last 20 trace spans from the affected service covering the anomaly window.
+Query Pinecone for the 3 most semantically similar past incidents using the AlertEvent as the embedding query.
+Compile all three sources into a structured context object (max 12,000 tokens to stay within GPT-4o context budget).
+Submit to GPT-4o with chain-of-thought system prompt. Require structured JSON output: list of Hypothesis objects.
+GPT-4o Prompt Structure
+SYSTEM: You are a senior SRE engineer performing root cause analysis.
+You will be given live telemetry from a microservices system.
+Reason step by step. Produce a ranked JSON list of hypotheses.
+
+Each hypothesis must contain:
+  - hypothesis_id: str
+  - description: str (what went wrong and why)
+  - confidence: float (0.0-1.0)
+  - evidence: list[str] (which log lines / traces / metrics support this)
+  - suggested_fix_category: Literal['restart','scale','rollback','config','db','cache']
+
+USER: Alert: {alert_json}
+      Logs: {log_lines}
+      Traces: {trace_spans}
+      Similar past incidents: {past_incidents}
+5. Full Technology Stack
+Every technology decision is justified by production adoption rates, ecosystem maturity, and direct relevance to SRE and AIOps engineering roles in 2026. No experimental libraries are permitted in the production path.
+Category
+Technology
+Justification
+Orchestration
+LangGraph 0.2+
+Stateful graph with persistent checkpointing, conditional routing, HITL interrupt nodes, and retry loop support. The only framework that natively handles all of this.
+Orchestration
+LangChain 0.3+
+Tool abstraction layer, structured output parsing (Pydantic), prompt template management for all agent prompts.
+LLM
+GPT-4o
+Root Cause Agent requires strong chain-of-thought and reliable structured JSON output. 128k context to fit full telemetry payload.
+LLM
+GPT-4o-mini
+Monitor Agent anomaly classification and Verifier Agent recovery checks. 10x cheaper than GPT-4o for simple classification tasks.
+Metrics
+Prometheus + PromQL
+Industry standard pull-based metrics. Python prometheus_api_client for PromQL queries. The Monitor Agent is built entirely on this.
+Logs
+Loki + LogQL
+Prometheus-native log aggregation. Structured JSON log queries via LogQL. Lightweight alternative to ELK for dev/demo environments.
+Tracing
+OpenTelemetry + Jaeger
+OTel is the CNCF-standard instrumentation layer for 2026. All target services emit OTel traces. Jaeger provides the HTTP query API.
+Infra Control
+Docker SDK (docker-py)
+Remediation Agent executes fixes via programmatic Docker API: container restart, image pull, resource limit update, network operations.
+Vector Memory
+Pinecone
+Learning Agent embeds incident postmortems. Root Cause Agent queries semantic similarity. Enables continual learning across sessions.
+Embeddings
+OpenAI text-embedding-3-small
+Fast, cost-effective embeddings for incident postmortem storage and retrieval. 1536-dimensional vectors.
+Backend API
+FastAPI + WebSockets
+AIOps REST API for incident management, HITL decisions, and report retrieval. WebSocket endpoint streams live agent decisions to dashboard.
+Database
+PostgreSQL + SQLAlchemy
+LangGraph state checkpointing, incident records, HITL audit log, user management. Production-grade persistence.
+Caching
+Redis
+LLM response cache (TTL 1 hour), rate-limit management, session state. Also used as a target service component for Redis-specific fault injection.
+Notifications
+Slack Webhooks
+HITL interrupt sends Slack message with incident summary, reasoning trace, and approve/reject action buttons. Highest demo impact.
+Frontend
+React 18 + TypeScript
+Live dashboard: incident timeline, real-time agent trace viewer, metric charts (Recharts), HITL approval panel, incident history.
+Observability
+LangSmith
+Full agent trace logging. Every LLM call, token count, tool use, and state transition is recorded. Essential for debugging and portfolio demo.
+Fault Injection
+Custom Python scripts
+inject_fault.py simulates memory_leak, cpu_spike, db_connection_exhaustion, redis_overflow, slow_query, and crash faults on demand.
+Containers
+Docker Compose
+Single-command full stack: target system + Prometheus + Loki + Jaeger + AIOps backend + frontend. Reproducible on any machine.
+Testing
+Pytest + LangChain Eval
+Unit tests for all agents. Integration tests for full pipeline. LangChain evaluation harness for hypothesis accuracy scoring.
+6. Functional Requirements
+6.1 Core Requirements â€” P0 (Must Have)
+FR-01: Real-Time Anomaly Detection
+Monitor Agent polls all 8 defined PromQL metrics every 30 seconds.
+Z-score algorithm fires AlertEvent only after 3 consecutive anomalous readings.
+AlertEvent is enriched with: service name, metric name, current value, expected range, and CRITICAL/HIGH/MEDIUM/LOW severity.
+Monitor Agent must handle Prometheus API unavailability gracefully (exponential backoff, alert on 3 consecutive failures).
+FR-02: LLM-Based Root Cause Analysis
+Root Cause Agent assembles context from Loki, Jaeger, and Pinecone before each LLM call.
+Context must not exceed 12,000 tokens (enforced by a pre-call token budget check).
+GPT-4o response must be parsed into a valid list of Hypothesis objects using Pydantic. Invalid responses trigger a retry (max 2 retries).
+Hypothesis list must be ranked by confidence score (descending).
+Minimum 1 hypothesis required to proceed. If 0 hypotheses are generated after 2 retries, the incident is escalated to human unconditionally.
+FR-03: Risk-Tiered Autonomous Remediation
+Every fix option must have a computed risk_score of LOW, MEDIUM, or HIGH based on: action type, service criticality, time of day, and retry count.
+LOW risk actions execute automatically via Docker SDK with no human approval.
+MEDIUM and HIGH risk actions trigger the HITL Supervisor interrupt.
+Remediation Agent must support at minimum: container_restart, image_rollback, memory_limit_update, service_scale_up, cache_flush, db_connection_pool_reset.
+All executed actions are written to AgentState execution_log with timestamp, action type, parameters, and result.
+FR-04: Human-in-the-Loop Interrupt
+LangGraph interrupt node is triggered for any MEDIUM or HIGH risk fix, or after 3 failed retry loops.
+On interrupt: full AgentState is serialized to PostgreSQL, Slack notification is sent within 10 seconds.
+Slack message must contain: incident summary, root cause hypothesis, proposed fix, risk score, and Approve/Override/Abort action buttons.
+Human can: (a) approve proposed fix, (b) override with a custom instruction, (c) abort the incident session.
+All HITL interactions are logged to the audit trail with user_id, timestamp, action, and reason.
+FR-05: Self-Healing Retry Loop
+If Verifier Agent confirms no recovery within 60 seconds, LangGraph routes back to Root Cause Agent with the next hypothesis from the ranked list.
+retry_count is incremented in AgentState on each loop.
+Maximum retries: 3. After 3 failed attempts, incident is unconditionally escalated to human regardless of risk score.
+Each retry must use a different hypothesis. Root Cause Agent must not repeat a hypothesis that was already attempted.
+FR-06: Continual Learning Memory
+Learning Agent runs on every resolved or escalated incident.
+Postmortem schema: incident_id, service, alert_signature, root_cause_confirmed, fix_applied, fix_outcome, time_to_recovery, retry_count, timestamp.
+Postmortem is embedded using OpenAI text-embedding-3-small and upserted to Pinecone with full metadata.
+Root Cause Agent queries Pinecone with the current alert signature before every LLM call, retrieving top-3 most similar past incidents.
+System must demonstrably resolve a repeated fault faster on second occurrence due to memory retrieval (validated in testing).
+6.2 Extended Requirements â€” P1 (Should Have)
+FR-07 Agent Trace Dashboard:
+ Incident timeline UI showing all agent decisions, tool calls, and state transitions in chronological order on the React dashboard.
+FR-08 Role-Based Access Control:
+ RBAC system with Admin (full access), SRE (approve HITL, view all incidents), Viewer (read-only incident history) roles.
+FR-09 AIOps Self-Observability:
+ Prometheus metrics exposed by the AIOps Control Plane itself: incidents_detected_total, incidents_resolved_total, avg_time_to_recovery, hitl_interventions_total.
+FR-10 Postmortem Export:
+ Export incident postmortem as formatted PDF or Markdown for documentation purposes.
+FR-11 Fault Injection Suite:
+ Configurable fault injection script (inject_fault.py) with at least 6 distinct fault types for repeatable demo scenarios.
+7. Non-Functional Requirements
+Requirement
+Target Specification
+Anomaly detection latency
+Alert fired within 90 seconds of fault injection (3 polls Ã— 30s)
+Root cause analysis time
+GPT-4o response + context assembly completed in under 30 seconds
+Low-risk remediation latency
+Container restart executed within 10 seconds of Remediation Agent decision
+HITL Slack notification delay
+Slack message delivered within 10 seconds of LangGraph interrupt
+System uptime
+AIOps Control Plane targets 99.9% uptime â€” it must never be the source of incidents
+LLM cost per incident
+Target average under $0.08 per resolved incident (GPT-4o-mini for simple tasks)
+PostgreSQL checkpointing
+All state transitions persisted within 500ms â€” no state loss on crash
+Test coverage
+Minimum 80% unit test coverage on all agent logic and API endpoints
+Container boot time
+Full docker-compose stack up and health-checked in under 90 seconds
+Memory baseline accuracy
+Second occurrence of same fault type resolved 40% faster than first occurrence
+Code quality
+Zero Ruff linting errors. Zero Black formatting issues. All PRs require review.
+Documentation
+All API endpoints in Swagger. README enables cold setup in under 20 minutes.
+8. Core Data Models
+8.1 AIOpsState â€” LangGraph State Schema
+The central TypedDict that flows through every node in the LangGraph graph. Every agent reads from and writes to specific fields. No agent may write to fields outside its defined output contract.
+class AIOpsState(TypedDict):
+    # Session metadata
+    incident_id:      str                   # UUID, generated at graph start
+    user_id:          str | None            # Set if HITL has been invoked
+    created_at:       datetime
+
+    # Monitor Agent output
+    alert:            AlertEvent            # metric, value, threshold, severity, service
+    raw_metrics:      dict[str, float]      # snapshot of all 8 metrics at alert time
+
+    # Root Cause Agent inputs & output
+    logs:             list[LogLine]         # last 50 lines from Loki
+    traces:           list[TraceSpan]       # OTel spans from Jaeger
+    past_incidents:   list[PastIncident]    # top-3 from Pinecone similarity search
+    hypotheses:       list[Hypothesis]      # ranked by confidence, descending
+    current_hypothesis_idx: int             # which hypothesis is currently being tried
+
+    # Remediation Agent output
+    fix_options:      list[FixOption]       # ranked by risk score
+    selected_fix:     FixOption | None
+    execution_log:    list[ActionResult]    # all Docker SDK calls made
+
+    # Verifier Agent output
+    recovery_confirmed: bool | None
+    recovery_metrics:   dict[str, float]   # post-fix metric snapshot
+
+    # Control flow
+    retry_count:      int                  # incremented on each replan loop
+    hitl_required:    bool
+    hitl_response:    HumanDecision | None
+
+    # Learning Agent output
+    postmortem:       Postmortem | None
+
+    # Final status
+    status:           Literal['active', 'paused', 'resolved', 'escalated', 'failed']
+    resolved_at:      datetime | None
+    time_to_recovery: float | None          # seconds
+    total_cost_usd:   float                 # sum of all LLM API costs
+8.2 Key Supporting Schemas
+Schema
+Fields
+AlertEvent
+service_name, metric_name, current_value, expected_mean, expected_std, severity, fired_at
+Hypothesis
+hypothesis_id, description, confidence (0-1), evidence (list[str]), suggested_fix_category, attempted (bool)
+FixOption
+fix_id, action_type, parameters (dict), risk_score, estimated_recovery_seconds, reasoning
+ActionResult
+action_type, parameters, executed_at, outcome (success/failure), docker_response, duration_seconds
+Postmortem
+incident_id, service, alert_signature, root_cause, fix_applied, outcome, time_to_recovery, retry_count, embedding_vector
+HumanDecision
+decision (approve/override/abort), custom_instruction (str|None), decided_by, decided_at, reason
+9. Delivery Phases & Milestones
+Six-week delivery plan. Each phase ends with a gate review. Phase N+1 does not begin until Phase N gate criteria are met. This prevents partial implementations from accumulating across phases.
+Phase
+Duration
+Key Deliverables
+Gate Criteria
+Phase 1
+Week 1
+Docker Compose: target system (3 services + PostgreSQL + Redis + Prometheus + Loki + Jaeger) running
+All target services instrumented with OpenTelemetry â€” traces visible in Jaeger UI
+Prometheus scraping all 8 metrics â€” visible in Prometheus UI
+LangGraph project scaffolded with PostgreSQL checkpointer configured
+AIOpsState Pydantic schema defined and validated
+inject_fault.py script with memory_leak and cpu_spike fault types working
+LangSmith project connected â€” test run traces visible
+docker-compose up starts all 9 containers healthy. A fault injection produces visible metric deviation in Prometheus.
+Phase 2
+Week 2
+Monitor Agent implemented â€” polls all 8 PromQL queries every 30s
+Z-score anomaly detection algorithm with 3-consecutive-reading threshold
+AlertEvent Pydantic schema and firing logic tested
+LangGraph graph compiled: START â†’ Monitor â†’ conditional edge â†’ END (for now)
+Unit tests for Monitor Agent: 10 test cases covering anomaly + no-anomaly scenarios
+Loki query tool (LogQL via python-loki) integrated and tested
+Jaeger query tool (HTTP API) integrated and tested
+Injecting a memory_leak fault causes Monitor Agent to fire a CRITICAL AlertEvent within 90 seconds.
+Phase 3
+Week 3
+Pinecone index created. Embedding pipeline tested with 5 synthetic past incidents
+Root Cause Agent implemented with Loki + Jaeger + Pinecone context assembly
+GPT-4o integration with structured Hypothesis output (Pydantic-validated)
+Remediation Agent with fix option generation and risk scoring logic
+Docker SDK tool calls: container_restart, memory_limit_update, image_rollback
+Graph extended: Monitor â†’ Root Cause â†’ Remediation â†’ conditional risk gate
+Integration test: full pipeline from alert to Docker action for memory_leak fault
+End-to-end pipeline resolves a memory_leak fault automatically from detection to restart in under 3 minutes.
+Phase 4
+Week 4
+Verifier Agent with 60-second recovery monitoring and retry loop logic
+HITL Supervisor: LangGraph interrupt + state serialization + Slack webhook notification
+Learning Agent: Pinecone postmortem upsert on incident close
+Graph fully assembled: all 6 agents, all conditional edges, retry loop complete
+HITL tested end-to-end: Slack message received, approval via API resumes graph
+Second-occurrence test: same fault resolves faster with memory retrieval (documented)
+inject_fault.py extended with db_connection_exhaustion and slow_query fault types
+Full 6-agent pipeline completes a HITL incident. Memory retrieval demonstrably reduces resolution time on repeat fault.
+Phase 5
+Week 5
+FastAPI REST API: all endpoints for incidents, HITL decisions, reports, auth
+WebSocket endpoint streaming real-time agent status to frontend
+React dashboard: live incident timeline, agent trace viewer, metric charts, HITL panel
+JWT auth + RBAC middleware (Admin, SRE, Viewer roles)
+Incident history with postmortem detail view and export
+docker-compose.prod.yml for production-mode deployment
+Full stack running. Dashboard shows live incident timeline. HITL approval works from the dashboard (not just API).
+Phase 6
+Week 6
+80%+ test coverage achieved across all agent logic and API endpoints
+All 6 fault types tested end-to-end with documented outcomes
+Performance benchmarking report: MTTR per fault type, cost per incident, LangSmith traces
+README with architecture overview, full setup guide, fault injection guide, demo script
+Swagger/OpenAPI documentation at /api/v1/docs
+5-minute recorded demo video: fault injection â†’ autonomous resolution â†’ HITL scenario â†’ memory learning
+CHANGELOG.md and final production readiness checklist signed off
+All NFRs met. Cold setup in under 20 minutes following README. Demo runs cleanly end to end.
+10. Repository & Folder Structure
+Monorepo structure with strict separation between the target system, the AIOps control plane, and the frontend. The target system and the control plane are independently deployable.
+ashia/                                  # Agentic Self-Healing Infrastructure Agent
+â”œâ”€â”€ target-system/                      # The infrastructure being monitored
+â”‚   â”œâ”€â”€ api-gateway/                    # FastAPI â€” entry point, OTel instrumented
+â”‚   â”œâ”€â”€ user-service/                   # FastAPI â€” user CRUD, PostgreSQL backed
+â”‚   â”œâ”€â”€ order-service/                  # FastAPI â€” order processing, memory intensive
+â”‚   â”œâ”€â”€ prometheus/
+â”‚   â”‚   â””â”€â”€ prometheus.yml              # Scrape config for all 3 services
+â”‚   â”œâ”€â”€ loki/
+â”‚   â”‚   â””â”€â”€ loki-config.yml
+â”‚   â”œâ”€â”€ jaeger/                         # OTEL collector config
+â”‚   â””â”€â”€ docker-compose.yml              # Target system only
+â”‚
+â”œâ”€â”€ aiops/                              # AIOps Control Plane
+â”‚   â”œâ”€â”€ src/
+â”‚   â”‚   â”œâ”€â”€ agents/
+â”‚   â”‚   â”‚   â”œâ”€â”€ monitor.py              # Monitor Agent + Z-score detection
+â”‚   â”‚   â”‚   â”œâ”€â”€ root_cause.py           # Root Cause Agent + GPT-4o reasoning
+â”‚   â”‚   â”‚   â”œâ”€â”€ remediation.py          # Remediation Agent + Docker SDK tools
+â”‚   â”‚   â”‚   â”œâ”€â”€ verifier.py             # Verifier Agent + recovery polling
+â”‚   â”‚   â”‚   â”œâ”€â”€ learning.py             # Learning Agent + Pinecone upsert
+â”‚   â”‚   â”‚   â””â”€â”€ hitl.py                 # HITL Supervisor + Slack notification
+â”‚   â”‚   â”œâ”€â”€ graph/
+â”‚   â”‚   â”‚   â”œâ”€â”€ graph.py                # LangGraph graph definition
+â”‚   â”‚   â”‚   â”œâ”€â”€ edges.py                # All conditional edge functions
+â”‚   â”‚   â”‚   â””â”€â”€ state.py                # AIOpsState TypedDict + all schemas
+â”‚   â”‚   â”œâ”€â”€ tools/
+â”‚   â”‚   â”‚   â”œâ”€â”€ prometheus_tool.py      # PromQL query wrapper
+â”‚   â”‚   â”‚   â”œâ”€â”€ loki_tool.py            # LogQL query wrapper
+â”‚   â”‚   â”‚   â”œâ”€â”€ jaeger_tool.py          # Jaeger HTTP API wrapper
+â”‚   â”‚   â”‚   â”œâ”€â”€ docker_tool.py          # Docker SDK action tools
+â”‚   â”‚   â”‚   â”œâ”€â”€ pinecone_tool.py        # Incident memory retrieval + upsert
+â”‚   â”‚   â”‚   â””â”€â”€ slack_tool.py           # HITL Slack notification sender
+â”‚   â”‚   â”œâ”€â”€ api/
+â”‚   â”‚   â”‚   â”œâ”€â”€ main.py                 # FastAPI app factory
+â”‚   â”‚   â”‚   â”œâ”€â”€ routes/                 # incidents.py, hitl.py, reports.py, auth.py
+â”‚   â”‚   â”‚   â””â”€â”€ middleware/             # auth.py, rbac.py, audit_log.py
+â”‚   â”‚   â”œâ”€â”€ db/
+â”‚   â”‚   â”‚   â”œâ”€â”€ models.py               # SQLAlchemy: Incident, HITL, User, AuditLog
+â”‚   â”‚   â”‚   â”œâ”€â”€ session.py              # DB session factory
+â”‚   â”‚   â”‚   â””â”€â”€ migrations/             # Alembic scripts
+â”‚   â”‚   â””â”€â”€ core/
+â”‚   â”‚       â”œâ”€â”€ config.py               # Pydantic settings from .env
+â”‚   â”‚       â””â”€â”€ logging.py              # Structured JSON logging
+â”‚   â”œâ”€â”€ tests/
+â”‚   â”‚   â”œâ”€â”€ unit/                       # Per-agent unit tests
+â”‚   â”‚   â”œâ”€â”€ integration/                # Full pipeline integration tests
+â”‚   â”‚   â””â”€â”€ eval/                       # LangChain hallucination eval harness
+â”‚   â”œâ”€â”€ Dockerfile
+â”‚   â””â”€â”€ requirements.txt
+â”‚
+â”œâ”€â”€ frontend/
+â”‚   â”œâ”€â”€ src/
+â”‚   â”‚   â”œâ”€â”€ components/                 # IncidentCard, AgentTrace, MetricChart, HITLPanel
+â”‚   â”‚   â”œâ”€â”€ pages/                      # Dashboard, IncidentDetail, History, Settings
+â”‚   â”‚   â”œâ”€â”€ hooks/                      # useWebSocket, useIncidents, useHITL
+â”‚   â”‚   â””â”€â”€ api/                        # Axios client + React Query hooks
+â”‚   â””â”€â”€ Dockerfile
+â”‚
+â”œâ”€â”€ scripts/
+â”‚   â””â”€â”€ inject_fault.py                 # Fault injection: 6 fault types
+â”‚
+â”œâ”€â”€ docker-compose.yml                  # Full stack: target + aiops + frontend
+â”œâ”€â”€ docker-compose.prod.yml
+â”œâ”€â”€ .env.example                        # All required env vars documented
+â””â”€â”€ README.md
+11. API Specification
+All endpoints versioned under /api/v1. Authentication required on all routes. WebSocket at /api/v1/incidents/{id}/stream for real-time agent updates.
+11.1 Incidents
+Method + Endpoint
+Description
+GET /incidents
+Paginated list of all incidents. Filters: status, severity, service, date range.
+GET /incidents/{id}
+Full incident detail: alert, hypotheses, fix applied, timeline, cost, postmortem.
+GET /incidents/{id}/stream
+WebSocket â€” streams real-time AgentState updates as JSON events.
+POST /incidents/{id}/hitl
+Submit human decision. Body: { decision, custom_instruction }. Resumes LangGraph.
+GET /incidents/{id}/postmortem
+Retrieve final postmortem for a resolved incident.
+GET /incidents/{id}/postmortem/export
+Export postmortem as PDF or Markdown. Query: format=pdf|markdown.
+11.2 System Health & Control
+Method + Endpoint
+Description
+GET /health
+AIOps control plane health. Returns: version, uptime, DB, Pinecone, LangSmith status.
+GET /metrics/summary
+Current snapshot of all 8 monitored PromQL metrics for all target services.
+POST /monitor/trigger
+Admin only â€” manually trigger a Monitor Agent poll cycle immediately.
+GET /memory/incidents
+List all incidents stored in Pinecone memory with similarity scores.
+DELETE /memory/incidents/{id}
+Admin only â€” remove a specific incident from Pinecone memory.
+11.3 Authentication
+Method + Endpoint
+Description
+POST /auth/register
+Register new user. Body: { name, email, password, role }.
+POST /auth/login
+Login. Returns: access_token (15min), refresh_token (7d).
+POST /auth/refresh
+Refresh access token using valid refresh token.
+POST /auth/logout
+Invalidate refresh token.
+GET /auth/me
+Current user profile and permissions.
+12. Fault Injection Suite
+The fault injection suite is a first-class deliverable â€” not an afterthought. It must be repeatable, configurable, and produce realistic telemetry patterns that match production failure signatures.
+Fault Type
+What It Does & Expected System Response
+memory_leak
+Progressively allocates memory in Order Service until OOM kill. Expected: memory_usage metric breaches threshold â†’ Monitor fires CRITICAL alert â†’ Root Cause identifies OOM â†’ Remediation restarts container.
+cpu_spike
+Runs a CPU-bound loop in User Service for 120 seconds. Expected: CPU throttle rate spikes â†’ MEDIUM severity alert â†’ Root Cause identifies runaway process â†’ Remediation restarts service.
+db_connection_exhaustion
+Opens 100 simultaneous idle DB connections, exhausting the connection pool. Expected: pg_stat_activity_count spikes â†’ HIGH severity â†’ HITL triggered due to DB risk.
+slow_query
+Injects a non-indexed query running every 5 seconds against Order Service DB. Expected: request latency p95 degrades â†’ Root Cause identifies slow query â†’ Remediation suggests index creation (manual HITL).
+redis_overflow
+Fills Redis to 95% memory capacity. Expected: cache miss rate spikes â†’ Monitor fires alert â†’ Remediation flushes expired keys.
+cascade_failure
+Injects memory_leak on Order Service + db_connection_exhaustion simultaneously. Expected: multi-signal alert â†’ Root Cause must reason across both signals â†’ demonstrates complex reasoning capability.
+inject_fault.py usage:
+# Single fault
+python scripts/inject_fault.py --type memory_leak --service order-service
+
+# Fault with auto-recover (resets after N seconds without agent intervention)
+python scripts/inject_fault.py --type cpu_spike --service user-service --duration 120
+
+# Cascade failure (demo mode)
+python scripts/inject_fault.py --type cascade_failure --delay 30
+
+# List available fault types
+python scripts/inject_fault.py --list
+13. Definition of Done
+A feature is not complete until every item in the applicable checklist is satisfied. Gate reviews are blocking â€” partial implementations do not pass.
+Production Readiness Checklist
+Every item below must be checked before the project is submitted.
+13.1 Functional Completeness
+All 6 fault types in inject_fault.py produce detectable metric deviations within 90 seconds.
+Monitor Agent fires correctly-classified AlertEvents for all 6 fault types.
+Root Cause Agent produces at least 2 plausible hypotheses for each fault type with confidence scores.
+Remediation Agent executes at least 4 of the 6 fix action types via Docker SDK successfully.
+HITL interrupt fires for at least 2 fault types (HIGH risk). Slack message received. Resume from approval works.
+Self-healing retry loop activates on at least one fault type where first hypothesis fails. System tries second hypothesis.
+Learning Agent memory demonstrated: same fault type on second injection resolved at least 40% faster.
+13.2 Code Quality
+Test coverage at or above 80% as reported by pytest-cov across all agents and API routes.
+Zero Ruff linting errors. Zero Black formatting issues. All enforced in CI.
+All agent functions have docstrings with: purpose, input fields read, output fields written.
+No hardcoded API keys, URLs, or secrets. All configuration via .env with .env.example provided.
+AgentState transitions are atomic â€” no partial state writes possible.
+13.3 Infrastructure & Observability
+docker-compose up starts all containers healthy in under 90 seconds on a clean machine.
+LangSmith project shows full trace for at least 10 incident resolutions â€” visible to reviewer.
+All Prometheus, Loki, and Jaeger UIs accessible locally with real data from target services.
+PostgreSQL has 0 corrupted LangGraph checkpoints across all test runs.
+13.4 Documentation & Demo
+README includes: system overview, architecture diagram (Mermaid), complete setup guide, fault injection guide, 5-minute demo script, environment variable reference.
+Swagger UI at /api/v1/docs shows all endpoints with request/response schemas.
+5-minute demo video covers: live metrics, fault injection, autonomous resolution, HITL scenario, and memory learning on repeat fault.
+CHANGELOG.md documents all architectural decisions and version history.
+14. Risks & Mitigations
+Risk
+Mitigation Strategy
+GPT-4o produces invalid JSON for Hypothesis output
+Wrap every LLM call in a Pydantic validation + retry decorator. Max 2 retries with a simplified prompt. On failure after 2 retries, escalate to HITL unconditionally.
+Docker SDK permissions â€” container restart requires elevated privileges
+Run Remediation Agent with a scoped Docker socket mount (read-write only for specific container names). Document security implications in README. Never mount /var/run/docker.sock in production without review.
+Prometheus / Loki / Jaeger unavailability breaks Monitor Agent
+Implement health checks on all three data sources at startup. Monitor Agent uses exponential backoff (3 retries). After 3 consecutive failures, fires a MetaAlert to HITL about observability stack degradation.
+Token budget overflow â€” telemetry context exceeds GPT-4o 128k limit
+Enforced token budget check before every LLM call. Log lines truncated to last 50. Trace spans limited to 20. Pinecone results limited to top-3. Hard cap at 12,000 tokens with assertion.
+Runaway retry loop â€” agent loops indefinitely
+retry_count field in AgentState with hard limit of 3. After 3 retries, conditional edge unconditionally routes to HITL regardless of risk score. Watchdog timeout of 15 minutes per incident.
+LLM cost overrun during development and testing
+Use GPT-4o-mini for Monitor Agent and Verifier Agent (classification only). GPT-4o only for Root Cause Agent. Implement Redis response cache with 1-hour TTL for identical context payloads. Set hard monthly budget in OpenAI dashboard.
+Pinecone cold start â€” first incident has no memory
+Pre-populate Pinecone with 10 synthetic past incidents covering all 6 fault types during setup. Document this as the knowledge base initialization step in README.
+Scope creep beyond 6-week timeline
+P1 features (FR-07 through FR-11) are frozen until all P0 gate criteria pass Phase 4. Kubernetes extension is v1.1 only. No new fault types added after Phase 3.
+15. Final Deliverables
+The following are submitted as a single GitHub repository link with a clean git history. Commit messages must follow Conventional Commits format.
+Public GitHub repository â€” clean git history, no binary blobs, no secrets in any commit.
+Full Docker Compose stack deployable on any machine with Docker and Docker Compose installed.
+LangSmith project link showing full agent traces for minimum 10 incident resolutions.
+Swagger/OpenAPI documentation live at /api/v1/docs on local deployment.
+README meeting all documentation requirements in Section 13.4.
+5-minute demo video (Loom or equivalent) link embedded in README.
+inject_fault.py covering all 6 fault types with usage documentation.
+Pytest coverage report (HTML) showing 80%+ coverage, committed to /docs/coverage.
+Bonus (ungraded): deploy to Railway or Render with a public URL and live demo link in README.
+A Note From Engineering Leadership
+This is not a tutorial project. There is no YouTube video walking you through exactly this system. You will hit walls â€” Prometheus queries that return nothing, LangGraph edges that route incorrectly, Docker SDK calls that silently fail. That friction is the point. The engineers who work through it and ship a working system are the ones this industry is desperately looking for.
+Build it like a system you would trust to fix your own servers at 3am.
+â€” MorpheLabs Engineering Team

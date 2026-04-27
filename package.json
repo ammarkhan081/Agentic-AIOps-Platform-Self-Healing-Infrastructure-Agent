@@ -1,0 +1,8 @@
+{
+  "name": "ashia-workspace",
+  "private": true,
+  "scripts": {
+    "format": "powershell -ExecutionPolicy Bypass -File ./scripts/format.ps1",
+    "validate": "powershell -ExecutionPolicy Bypass -File ./scripts/validate.ps1"
+  }
+}
